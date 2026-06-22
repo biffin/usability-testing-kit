@@ -1,0 +1,11 @@
+# dependencies
+node_modules/
+
+# secrets — copy .env.example to .env and add your key
+.env
+
+# os / editor cruft
+.DS_Store
+
+# playwright runtime artifacts
+.playwright-mcp/
