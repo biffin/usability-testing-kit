@@ -1,0 +1,41 @@
+{
+  "$comment": "Single source of truth for the SessionScore. Claude reads this during a session (CLAUDE.md Step 3b), the evaluator validates against it, and the report/diff tools consume it. Every scorecard.json records a hash of this file, so a re-test can tell whether a score moved because the SITE changed or the RULER (these weights/anchors) changed.",
+
+  "weights": {
+    "$comment": "SessionScore = success*w + efficiency*w + (seq/7)*w + (intent/7)*w + (confidence/7)*w. Must sum to 1.0 — the loader enforces this.",
+    "success": 0.4,
+    "efficiency": 0.2,
+    "seq": 0.133,
+    "intent": 0.133,
+    "confidence": 0.134
+  },
+
+  "result": {
+    "$comment": "Observed task-success values by outcome (ISO 9241-11 effectiveness).",
+    "PASS": 1.0,
+    "PARTIAL": 0.5,
+    "FAIL": 0.0
+  },
+
+  "likert": {
+    "$comment": "Shared 1-7 anchors for all three self-report items. Claude states these to the persona before asking, and the persona's baseline skepticism shapes the answer.",
+    "min": 1,
+    "max": 7,
+    "anchors": {
+      "1": "I'd close the tab and never come back / never recommend this",
+      "4": "Neutral. No strong feeling either way.",
+      "7": "Best site I've used for this kind of product."
+    },
+    "items": {
+      "seq": "Overall, how easy was that?",
+      "intent": "Would you take the next step (demo / signup / share with team)?",
+      "confidence": "How confident are you that you actually found / understood what you were looking for?"
+    }
+  },
+
+  "eval": {
+    "$comment": "Validator settings.",
+    "sessionScoreTolerance": 0.03,
+    "efficiencyTolerance": 0.02
+  }
+}

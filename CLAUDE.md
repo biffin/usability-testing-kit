@@ -13,6 +13,7 @@ There are two modes. Read the trigger phrase and follow the matching instruction
 ```
 usability-testing-kit/
 ├── CLAUDE.md, generate-prompt.md, templates/, lib/, eval/, synthesize.js   ← shared kit code
+├── config/scoring.json             ← ALL SessionScore weights + Likert anchors (single source of truth)
 └── projects/
     └── [slug]/
         ├── project.md                  ← metadata: URL, dates, goal, status
@@ -20,11 +21,14 @@ usability-testing-kit/
         ├── tasks/
         ├── sessions/
         │   └── [persona-firstname]/
-        │       └── [task-number]/
-        │           ├── transcript.md
+        │       └── [task-number]/      ← "01", or "01-r1"/"01-r2"/… for replication runs
+        │           ├── transcript.md    ← the human artifact (narration + scorecard)
+        │           ├── scorecard.json   ← machine-readable metrics + steps + issues + provenance
         │           └── screenshots/
         ├── _research/screenshots/      ← screenshots from Mode 1 site analysis
-        ├── findings.md                 ← written by synthesize.js
+        ├── findings.md                 ← synthesized report
+        ├── report.html                 ← written by lib/report.js (self-contained)
+        ├── diff-report.md              ← written by lib/diff.js (re-tests only)
         └── eval-report.md              ← written by eval/check-sessions.js
 ```
 
@@ -100,7 +104,7 @@ Then print a summary:
 ---
 
 ## MODE 2 — RUN SESSION
-**Trigger:** User says "run [persona] through task [N]" or "run [persona name] on task [N]". The trigger may include a project slug ("...in stripe") or omit it.
+**Trigger:** User says "run [persona] through task [N]" or "run [persona name] on task [N]". The trigger may include a project slug ("...in stripe") or omit it. It may also request replications ("...×3") — see the REPLICATION RUNS section below.
 
 ### Your job
 Role-play as the persona. Navigate the website. Narrate what you see, think, and feel as that person. Save a detailed transcript.
@@ -127,33 +131,28 @@ Also create `projects/[slug]/sessions/[persona-firstname]/[task-number]/screensh
 - Stop when completion criteria are met OR failure criteria are triggered OR max steps reached
 
 ### Step 3b: Compute the Quantitative Scorecard
-Before writing the transcript, compute these 5 metrics.
+
+**Read `config/scoring.json` first** — it holds the weights, the PASS/PARTIAL/FAIL values, and the Likert anchors. It is the single source of truth; do not hard-code these numbers from memory, and if the config has been tuned, use the tuned values.
+
+Compute these 5 metrics.
 
 **Observed metrics (computed from the session):**
-1. **Task success** — `1.0` for PASS, `0.5` for PARTIAL, `0.0` for FAIL
+1. **Task success** — the `result` value from config (`1.0` PASS / `0.5` PARTIAL / `0.0` FAIL by default)
 2. **Efficiency** — `min(1.0, optimal_steps / actual_steps)` using the `Optimal step count` from the task file
 
-**Self-report metrics (ask the persona, in character, 1–7 Likert):**
+**Self-report metrics (ask the persona, in character, using the Likert anchors from `config/scoring.json`):**
 
-For each of the three Likert items, state the scale anchors first, then ask the persona — in their own voice — to give a number AND one sentence of reasoning grounded in what they just experienced. The persona's baseline skepticism (from their persona file) must shape the answer: a skeptical, burned-before persona does not give 7s easily; an eager-buyer persona doesn't give 1s without strong reason.
+For each of the three items, state the scale anchors first, then ask the persona — in their own voice — to give a number AND one sentence of reasoning grounded in what they just experienced. The persona's baseline skepticism (from their persona file) must shape the answer: a skeptical, burned-before persona does not give 7s easily; an eager-buyer persona doesn't give 1s without strong reason.
 
-Scale anchors (use for all three):
-- 1 = "I'd close the tab and never come back / never recommend this"
-- 4 = "Neutral. No strong feeling either way."
-- 7 = "Best site I've used for this kind of product."
+3. **SEQ (ease)**, 4. **Intent**, 5. **Task confidence** — the three `likert.items` in the config. (Confidence is in their OWN success, NOT in the company.)
 
-3. **SEQ (ease)** — "Overall, how easy was that?"
-4. **Intent** — "Would you take the next step (demo / signup / share with team)?"
-5. **Task confidence** — "How confident are you that you actually found / understood what you were looking for?" (Note: confidence in their own success, NOT in the company.)
+**Composite (computed):** apply the weighted formula from `config/scoring.json` —
+`SessionScore = Σ weightᵢ · normalizedᵢ` (Success and Efficiency are already 0–1; each Likert value is divided by 7). Round to two decimals. **Verify your arithmetic** — the evaluator recomputes this and will flag a mismatch.
 
-**Composite (computed):**
-- `SessionScore = 0.4·Success + 0.2·Efficiency + 0.133·(SEQ/7) + 0.133·(Intent/7) + 0.133·(TaskConfidence/7)`
-- Round to two decimals.
+### Step 4: Save the transcript AND the scorecard sidecar
+Save **two** files in `projects/[slug]/sessions/[persona]/[task]/`.
 
-### Step 4: Save the transcript
-Save to `projects/[slug]/sessions/[persona]/[task]/transcript.md`.
-
-The transcript must include, in this order:
+**(a) `transcript.md`** — the human artifact. In this order:
 - Header: persona name, task name, date, starting URL, result (PASS / PARTIAL PASS / FAIL)
 - Step-by-step narration with persona quotes in `> *"quote"*` format
 - Task completion assessment table
@@ -173,12 +172,32 @@ The transcript must include, in this order:
 | SEQ (ease) | 3 / 7 | "It wasn't terrible but I had to hunt." |
 | Intent | 2 / 7 | "I'm not filling out a form to learn the price." |
 | Task confidence | 4 / 7 | "I think that was the right page, but I'm not sure I got the tier for my size." |
-| **SessionScore** | **0.42** | |
+| **SessionScore** | **0.47** | |
 
 Raw counters: actual_steps=8, optimal_steps=4.
 ```
 
-Every row is required. Likert rows must include the persona's one-sentence reasoning in their own voice — not a generic UX comment.
+Every row is required. Likert rows must include the persona's one-sentence reasoning in their own voice — not a generic UX comment. (The 0.47 above is the exact formula result for these inputs — always show the computed value, not a rounded guess.)
+
+**(b) `scorecard.json`** — the machine-readable sidecar that `report.js`, `diff.js`, and the evaluator consume. Same numbers as the transcript. Schema:
+
+```json
+{
+  "persona": "sarah", "task": "01", "result": "PARTIAL",
+  "metrics": { "success": 0.5, "efficiency": 0.5, "seq": 3, "intent": 2, "confidence": 4 },
+  "sessionScore": 0.47,
+  "counters": { "actualSteps": 8, "optimalSteps": 4 },
+  "steps": [
+    { "n": 1, "action": "clicked 'Pricing' in nav", "screenshot": "02-pricing.png", "quote": "Where's the actual price?" }
+  ],
+  "issues": [ { "severity": "high", "text": "pricing hidden behind demo form" } ],
+  "meta": { "kitVersion": "<from package.json>", "scoringHash": "<hash printed by the eval / doctor>", "model": "<the model you are running as>", "date": "<today>" }
+}
+```
+
+- `steps[].screenshot` must match a real filename in `screenshots/` — this is what the report's journey strip renders.
+- `meta.scoringHash` is the hash of `config/scoring.json` (run `node lib/doctor.js` to see it). `meta.model` is the model role-playing the persona. Together they let a re-test tell whether a score moved because the site changed or the instrument did.
+- The numbers in the JSON must match the transcript exactly — the evaluator cross-checks them.
 
 ---
 
@@ -190,4 +209,21 @@ Every row is required. Likert rows must include the persona's one-sentence reaso
 - If a chatbot pops up and the persona would close it — close it (the persona behaves as they would)
 - Note when something is missing (e.g. "no pricing visible", "no SMB examples") — absence is a finding
 - Keep screenshots named sequentially: `01-hero.png`, `02-nav-open.png`, etc.
+- **Cite every factual claim.** Whenever the narration states a specific fact — a price, a trial length, a certification, a percentage, a plan name — put the screenshot filename that shows it in brackets right after: `it says $99/mo [03-pricing.png]`. The evaluator FAILS any factual claim with no citation. This is what keeps a synthetic session honest: a claim someone can check on a frame, not a number the model might have imagined.
+- Scoring weights and Likert anchors live in `config/scoring.json` — the single source of truth. If a user wants to reweight (e.g. Intent over Ease for an e-commerce study), edit that file, never hard-code a new formula. Re-scored sessions carry a new `scoringHash`.
 - Never write files outside the active `projects/[slug]/` folder, except when updating shared kit code on explicit request.
+
+## REPLICATION RUNS
+
+A single synthetic session is one draw; the same persona could plausibly succeed or fail on an ambiguous site. When the user asks for replications — **"run Sarah through task 01 ×3"** — run the session N independent times and save each under a suffixed task folder: `sessions/sarah/01-r1/`, `01-r2/`, `01-r3/` (each with its own transcript.md + scorecard.json + screenshots/). Approach each run fresh — don't copy the previous one's narration or scores. The report and diff aggregate replications automatically and show the spread (a wide spread is itself a finding: the experience is ambiguous). Default is a single run; reserve ×N for the sessions that will drive a decision.
+
+## AFTER A STUDY — the finishing toolchain
+
+Tell the user what each command produced:
+1. `node eval/check-sessions.js [slug]` — validate every session (scorecard math, sidecar agreement, persona vocabulary, claim citations, step bounds, coherence).
+2. Synthesize findings in-conversation for free ("read all transcripts in projects/[slug]/ and write findings.md") — do this BEFORE report.js so the findings embed in the HTML.
+3. `node lib/report.js [slug]` — build the shareable `report.html` (heatmap, journey strips, issue rollup).
+
+For a **re-test** of a site that already has a study, use a suffixed slug (e.g. `acme-v2`), run the SAME personas through the SAME tasks, then `node lib/diff.js [old-slug] [new-slug]` and lead your summary with the diff headline (improved/worse/unchanged, FAIL→PASS transitions).
+
+If a user reports setup problems, have them run `node lib/doctor.js` and work from its output.

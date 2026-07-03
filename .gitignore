@@ -7,5 +7,13 @@ node_modules/
 # os / editor cruft
 .DS_Store
 
+# internal planning doc — kept locally, not part of the published kit
+IMPROVEMENT-PLAN.md
+
 # playwright runtime artifacts
 .playwright-mcp/
+
+# your research stays local — usability findings are often confidential
+projects/*
+!projects/.gitkeep
+!projects/README.md

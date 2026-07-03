@@ -1,183 +1,140 @@
 # Usability Testing Kit
 
-Synthetic usability testing for any website. Claude Code controls a real browser, role-plays as buyer personas, and saves detailed transcripts — all from a single conversation.
+**Synthetic usability testing for any website, run entirely inside Claude Code.** Claude browses a site as a set of hand-built buyer personas, narrates what each one sees, thinks, and feels while trying to complete real tasks, and scores every session on five research metrics. You get transcripts, screenshots, a shareable HTML report with a persona × task heatmap, and — after you ship fixes — a measured before/after diff.
+
+It's the sibling of the [Cognitive Walkthrough Kit](../cognitive-walkthrough-kit): same "everything runs inside Claude Code" design, opposite lens. The cognitive kit measures the *designed* cognitive load of the happy path from the DOM. This kit measures how specific *people* experience the site — where they get lost, what they misread, whether they'd take the next step. Run both and you've audited the same site from both ends.
+
+```
+you: "generate for https://your-site.com"     →  Claude browses the site, builds 4–5 personas + 5–6 tasks
+you: "run Sarah through task 01"              →  Claude drives the browser as Sarah, narrating in her voice
+                                                  saves a transcript, screenshots, and a scored scorecard.json
+you: node lib/report.js your-site            →  one self-contained report.html: heatmap, journey strips, issues
+```
 
 ---
 
-## How it works
+## What you get per session
 
-1. You give Claude Code a website URL
-2. Claude browses the site and generates buyer personas + research tasks tailored to that company
-3. Claude then runs sessions: navigating the site as each persona, narrating what they see, think, and feel
-4. You end up with transcripts, screenshots, and a synthesized findings report
+Each session produces a five-metric scorecard next to the qualitative narration:
 
-No scripting. No API calls during sessions. Everything runs inside Claude Code.
+| Metric | What it captures |
+|--------|------------------|
+| **Task success** | PASS / PARTIAL / FAIL → 1.0 / 0.5 / 0.0 (ISO 9241-11 effectiveness) |
+| **Efficiency** | `optimal_steps / actual_steps`, capped at 1.0 (a synthetic stand-in for time on task) |
+| **SEQ** (1–7) | "Overall, how easy was that?" — the standard post-task ease question |
+| **Intent** (1–7) | "Would you take the next step?" — the conversion signal |
+| **Task confidence** (1–7) | "How sure are you that you actually found it?" — catches *false success* |
 
-### Quantitative metrics
+These roll up into a composite **SessionScore** (0–1) for ranking sessions and personas. The formula and the Likert anchors live in one file — [`config/scoring.json`](config/scoring.json) — so you can tune them to your study and every tool stays in sync.
 
-Each session produces a 5-metric scorecard alongside the qualitative narration:
-
-1. **Task success** — PASS / PARTIAL / FAIL → 1.0 / 0.5 / 0.0 (ISO 9241-11 effectiveness)
-2. **Efficiency** — `optimal_steps / actual_steps`, capped at 1.0 (synthetic stand-in for time on task)
-3. **SEQ** (1–7) — "Overall, how easy was that?" (the standard post-task ease metric)
-4. **Intent** (1–7) — "Would you take the next step?" (conversion signal)
-5. **Task confidence** (1–7) — "How confident are you that you actually found it?" (catches false success)
-
-Plus a composite **SessionScore** (0–1) for ranking sessions. Future phases can add first-click success, vendor trust, lostness, and comprehension — see the plan file for the rollout.
+The persona's **baseline skepticism** shapes every self-report answer: a burned-before gatekeeper doesn't hand out 7s, and an eager buyer doesn't give 1s without reason. That's what keeps the numbers from being uniformly polite.
 
 ---
 
-## Setup (one-time, ~5 minutes)
+## Quickstart (5 minutes)
 
-### 1. Open this folder in Claude Code
+**Prerequisites:** [Node 18+](https://nodejs.org) and [Claude Code](https://claude.com/claude-code).
 
-The `CLAUDE.md` file is loaded automatically — it tells Claude what to do in both generation and session modes.
+```bash
+git clone <this-repo> usability-testing-kit
+cd usability-testing-kit
+node lib/doctor.js        # verifies your environment + runs a scoring self-test
+```
 
-### 2. Make sure Playwright MCP is enabled
+Then open the folder in Claude Code. The repo ships a `.mcp.json` with the Playwright browser server — approve it when Claude Code asks. That's the whole setup.
 
-Claude Code needs the Playwright MCP server to control a browser. Check your Claude Code settings — if Playwright isn't listed, add it:
+Run your first study by talking to Claude:
+
+| Say | What happens |
+|-----|--------------|
+| `generate for https://your-site.com` | Claude browses the site and writes 4–5 personas + 5–6 tasks to `projects/your-site/` |
+| `run Sarah through task 01` | one session: browser navigation, in-character narration, transcript + `scorecard.json` |
+| `run Sarah through task 01 ×3` | a **replication run** — three independent sessions, so you can see the score's spread, not just a single number |
+| `read all transcripts in projects/your-site/ and write findings.md` | Claude synthesizes the findings report (free, in-conversation) |
+
+Then generate the deliverables from your terminal:
+
+```bash
+node eval/check-sessions.js your-site   # validate every session (scorecard math, vocab, citations, coherence)
+node lib/report.js your-site           # one self-contained report.html — heatmap + journey strips, shareable
+```
+
+---
+
+## Commands
+
+| Command | What it does |
+|---------|--------------|
+| `node lib/doctor.js` | Environment check + scoring self-test — run first after cloning |
+| `node eval/check-sessions.js <slug>` | Validate every session: scorecard math, sidecar agreement, persona vocabulary, claim citations, step bounds, coherence |
+| `node lib/report.js <slug>` | Build `projects/<slug>/report.html` — persona×task heatmap, aggregate metrics, cross-session issue rollup, per-session cards, journey strips |
+| `node lib/diff.js <baseline> <current>` | Compare two studies session by session — the measured before/after |
+| `node synthesize.js <slug>` | *(optional, API)* batch findings report |
+
+All are also npm scripts (`npm run doctor`, `npm run report -- <slug>`, …). Everything except `synthesize.js` is pure Node with zero dependencies — no `npm install` needed.
+
+---
+
+## Tuning the scoring — and why scores are versioned
+
+Every weight, Likert anchor, and result value lives in one file: **[`config/scoring.json`](config/scoring.json)**. If your team decides Intent should outweigh Ease for an e-commerce study, you edit one file and Claude's in-session math, the validator, the report, and the diff all agree instantly.
+
+Every session also writes a machine-readable **`scorecard.json`** sidecar next to its transcript, stamped with the kit version, a **hash of the scoring config**, and **the model that role-played the persona**:
 
 ```json
-{
-  "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["@playwright/mcp@latest"]
-    }
-  }
-}
+"meta": { "kitVersion": "2.0.0", "scoringHash": "8affff00f285", "model": "claude-opus-4-8", "date": "2026-07-03" }
 ```
 
-Restart Claude Code after adding it.
+This is what makes re-tests trustworthy. A synthetic persona is a measurement instrument; a persona played by a *different model* — or scored under *different weights* — is a different instrument. When a score moves between two studies, the hash and model stamp tell you whether the *site* changed or the *ruler* did. `lib/diff.js` checks it automatically and warns on mismatch.
 
-### 3. Install synthesis dependencies (optional)
+## The re-test workflow (measuring your fixes)
 
-Only needed if you want to run `synthesize.js` to auto-generate `findings.md`. You can skip this and ask Claude Code to synthesize in-conversation instead.
+1. Study: `generate for https://site.com` → run sessions → ship the report.
+2. The team ships fixes.
+3. Re-test under a new slug (`site-v2`), running the **same** personas through the **same** tasks.
+4. `node lib/diff.js site site-v2` → per-session deltas, FAIL→PASS transitions, and the headline: *"7 improved · 1 worse · 2 unchanged; mean SessionScore 0.54 → 0.71."*
 
-```bash
-npm install
-cp .env.example .env
-# Open .env and paste your key from console.anthropic.com
-```
+Before/after numbers are what get design work funded — this loop is why the kit scores at all.
 
 ---
 
-## Running research on a new company
+## What this is — and isn't
 
-The kit is **multi-project**. Every project lives under `projects/<slug>/` and is fully self-contained. The kit code (templates, lib, eval, synthesize) is shared across all projects.
+Synthetic personas are a **rehearsal for real research, not a replacement for it.** They are good at predicting a specific and valuable class of problem:
 
-**Slug convention:** lowercase domain root. `https://www.stripe.com` → `stripe`. Running the same site again? Suffix it: `stripe-2026-redesign`.
+- **Findability** — can someone with this mental model locate the thing?
+- **Comprehension** — does the copy mean to them what you intended?
+- **Information scent** — do the nav labels and CTAs point where people expect?
 
-### Step 1 — Generate personas and tasks
+They are **weak proxies** for emotion, brand trust, and genuine willingness to pay — a model can *estimate* how a skeptical buyer feels, but it isn't one, and it has never had to spend the money. Treat the SessionScores as a prioritized map of where to point real research, the persona quotes as hypotheses to test with humans, and the false-success flags (high confidence + FAIL) as the highest-value thing the method surfaces cheaply.
 
-Open a new Claude Code conversation in this folder and say:
-
-> "Generate for https://www.example.com"
-
-Claude will:
-- Create `projects/example/` with `personas/`, `tasks/`, `sessions/`, `_research/screenshots/`, and a `project.md` metadata file
-- Browse the site (homepage, nav, pricing, industries, case studies)
-- Generate 4–5 buyer personas saved to `projects/example/personas/`
-- Generate 5–6 research tasks saved to `projects/example/tasks/`
-- Print a summary of what was generated and why
-
-**Review the generated files.** Edit anything that feels off. The AI's first pass is a strong starting point, not gospel.
-
-### Step 2 — Run sessions
-
-```
-Run [persona name] through task 01
-Run [persona name] through task 02 in example
-```
-
-If only one project exists, Claude will use it automatically. Otherwise specify the slug. Claude opens a browser, navigates as the persona, narrates their experience, and saves:
-- `projects/<slug>/sessions/[persona]/[task]/transcript.md`
-- `projects/<slug>/sessions/[persona]/[task]/screenshots/`
-
-### Step 3 — Synthesize findings
-
-**Option A — In conversation:**
-> "Read all the transcripts in projects/example/ and produce a structured findings report"
-
-**Option B — Script:**
-```bash
-npm run synthesize -- <slug>
-# or
-node synthesize.js <slug>
-```
-Outputs `projects/<slug>/findings.md`. The report opens with an **Aggregate Metrics dashboard** (success rates per task and per persona, mean SEQ/Intent flags, false-success-risk flags, persona × task SessionScore heatmap, weighted issue density), followed by 6–10 severity-tagged qualitative findings with persona quotes.
-
-### Step 4 — Evaluate the sessions (optional)
-
-```bash
-npm run eval -- <slug>
-# or
-node eval/check-sessions.js <slug>
-```
-
-Runs Tier 1 automated checks on every transcript and writes `projects/<slug>/eval-report.md`. Catches the most common synthetic-research failures before you trust the findings:
-
-1. **Scorecard completeness** — all 5 metrics present, math correct (Efficiency, SessionScore), Likert items have persona reasoning, values in 1–7 range.
-2. **Persona vocabulary** — fails if the persona used a banned word from their persona file; warns if they used none of their characteristic words.
-3. **Hallucination claims** — surfaces specific factual claims (prices, percentages, trial lengths, certifications) for you to spot-check against screenshots.
-4. **Step bound** — `actual_steps` ≤ `Max steps` from the task file.
-5. **Construct coherence** — flags internal contradictions like Success=FAIL but SEQ=7/7.
-
-Re-run any time after new sessions land. No API calls, no dependencies — pure parsing.
-
-> **Slug-resolution shortcut:** if exactly one project exists under `projects/`, you can omit the slug for both `synthesize` and `eval`.
-
----
-
-## Starting a new project alongside an existing one
-
-Just point Claude at the new URL:
-
-> "Generate for https://www.acme.com"
-
-A new `projects/acme/` folder is created. Your existing projects stay untouched. To compare across projects, run synthesize/eval on each separately — each project's `findings.md` and `eval-report.md` live in its own folder.
-
-To archive or share one project, zip its `projects/<slug>/` folder. The kit code at the root never needs to travel with it.
-
----
+The kit is built to keep itself honest about this: every factual claim in a transcript (a price, a trial length, a certification) must cite the screenshot it came from, and the evaluator fails any claim that doesn't — so "it costs $99/mo" is always checkable against a frame, never taken on faith.
 
 ## Project structure
 
 ```
 usability-testing-kit/
-├── CLAUDE.md                  ← Instructions for Claude Code (auto-loaded)
-├── generate-prompt.md         ← Detailed generation spec (Claude reads this)
-├── templates/
-│   ├── persona.md             ← Persona schema with field guide + example
-│   ├── task.md                ← Task schema with field guide + 5 universal stubs
-│   └── project.md             ← Per-project metadata header
+├── CLAUDE.md                  ← the methodology: instructions Claude Code follows (two modes)
+├── generate-prompt.md         ← persona + task generation spec
+├── .mcp.json                  ← Playwright browser server (Claude Code picks it up automatically)
+├── config/
+│   └── scoring.json           ← weights, Likert anchors, result values; hashed into each scorecard
+├── templates/                 ← persona schema, task schema (+ 5 universal task stubs), project metadata
 ├── lib/
-│   └── prompts.js             ← Synthesis prompt builder
-├── eval/
-│   └── check-sessions.js      ← Tier 1 automated session checks
-├── synthesize.js              ← Optional: generates findings.md via API
-├── .env.example               ← API key template
+│   ├── doctor.js             ← environment checker + scoring self-test (run first)
+│   ├── config.js             ← scoring-config loader + provenance hashing
+│   ├── report.js             ← self-contained report.html per project
+│   ├── diff.js               ← re-test comparison
+│   └── prompts.js            ← synthesis prompt builder (optional API)
+├── eval/check-sessions.js     ← validation harness → eval-report.md
+├── synthesize.js              ← optional API-based findings generator
 └── projects/
-    └── <slug>/                ← One folder per research project
-        ├── project.md         ← URL, dates, status, scope notes
-        ├── personas/          ← Generated by Claude (one file per persona)
-        ├── tasks/             ← Generated by Claude (one file per task)
-        ├── sessions/          ← Session output (transcripts + screenshots)
-        ├── _research/         ← Mode 1 site-analysis screenshots
-        ├── findings.md        ← Written by synthesize.js
-        └── eval-report.md     ← Written by eval/check-sessions.js
+    └── <your-slug>/           ← one folder per site (created by Mode 1, stays local)
+        ├── project.md · personas/ · tasks/ · findings.md · eval-report.md · report.html
+        └── sessions/<persona>/<task>/
+            ├── transcript.md · scorecard.json · screenshots/
 ```
 
----
+Your research data lives under `projects/` and is **git-ignored** — usability findings are often confidential and can never be committed by accident.
 
-## Recommended session order
-
-Run all tasks for one persona before moving to the next. Watch the first session live — does the persona sound like a real person? Adjust their vocabulary and pain points if needed before running more sessions.
-
-| Persona type | Tasks to run |
-|---|---|
-| Economic buyer | 01, 02, 03, 04, 05 |
-| End user / practitioner | 01, 02, 04, 05 |
-| Technical evaluator | 01, 02, 04, 05, (06 if applicable) |
-| Skeptic / gatekeeper | 01, 03, 04, 05 |
-| Existing customer | 02, 04, 05, (06 if applicable) |
+MIT licensed. Issues and PRs welcome — especially persona/task sets for site types the templates don't cover well yet.

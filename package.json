@@ -1,10 +1,13 @@
 {
   "name": "usability-testing-kit",
-  "version": "1.0.0",
-  "description": "Reusable synthetic usability-testing kit — point Claude Code at any website to generate personas, tasks, and session transcripts",
+  "version": "2.0.0",
+  "description": "Reusable synthetic usability-testing kit — point Claude Code at any website to generate personas, tasks, and session transcripts, then score, report, and diff them.",
   "scripts": {
-    "synthesize": "node synthesize.js",
-    "eval": "node eval/check-sessions.js"
+    "doctor": "node lib/doctor.js",
+    "eval": "node eval/check-sessions.js",
+    "report": "node lib/report.js",
+    "diff": "node lib/diff.js",
+    "synthesize": "node synthesize.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",

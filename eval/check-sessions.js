@@ -9,9 +9,11 @@
 
 const fs = require('fs');
 const path = require('path');
+const { loadConfig } = require('../lib/config');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const PROJECTS_DIR = path.join(PROJECT_ROOT, 'projects');
+const CONFIG = loadConfig();
 
 function resolveSlug(argSlug) {
   if (!fs.existsSync(PROJECTS_DIR)) {
@@ -51,10 +53,12 @@ function initPaths(slug) {
   REPORT_PATH = path.join(PROJECT_DIR, 'eval-report.md');
 }
 
+// Weights + tolerances now come from config/scoring.json (single source of
+// truth shared with Claude's in-session math and the report/diff tools).
 const SCORECARD_FORMULA = {
-  // SessionScore = 0.4*Success + 0.2*Efficiency + 0.133*(SEQ/7) + 0.133*(Intent/7) + 0.133*(Confidence/7)
-  weights: { success: 0.4, efficiency: 0.2, seq: 0.133, intent: 0.133, confidence: 0.133 },
-  tolerance: 0.03,
+  weights: CONFIG.scoring.weights,
+  tolerance: CONFIG.scoring.eval.sessionScoreTolerance,
+  efficiencyTolerance: CONFIG.scoring.eval.efficiencyTolerance,
 };
 
 // ---------- discovery ----------
@@ -72,11 +76,18 @@ function discoverSessions() {
     for (const task of tasks) {
       const transcriptPath = path.join(personaDir, task.name, 'transcript.md');
       if (fs.existsSync(transcriptPath)) {
+        const scorecardPath = path.join(personaDir, task.name, 'scorecard.json');
+        let scorecardJson = null;
+        if (fs.existsSync(scorecardPath)) {
+          try { scorecardJson = JSON.parse(fs.readFileSync(scorecardPath, 'utf8')); }
+          catch (e) { scorecardJson = { __parseError: e.message }; }
+        }
         sessions.push({
           persona: persona.name,
           task: task.name,
           transcriptPath,
           transcript: fs.readFileSync(transcriptPath, 'utf8'),
+          scorecardJson,
         });
       }
     }
@@ -187,7 +198,7 @@ function parseTaskBounds(taskPath) {
 
 // ---------- checks ----------
 
-function checkScorecardCompleteness(scorecard) {
+function checkScorecardCompleteness(scorecard, stampedHash) {
   if (!scorecard) {
     return { status: 'fail', message: 'No Quantitative Scorecard section found in transcript' };
   }
@@ -198,6 +209,7 @@ function checkScorecardCompleteness(scorecard) {
   }
 
   const issues = [];
+  let softMathNote = null; // provenance-downgraded mismatch (WARN, not FAIL)
 
   // Likert justifications required
   for (const [k, label] of [['seqNote', 'SEQ'], ['intentNote', 'Intent'], ['confidenceNote', 'Task confidence']]) {
@@ -209,12 +221,14 @@ function checkScorecardCompleteness(scorecard) {
   // Math: Efficiency = min(1, optimal/actual)
   if (scorecard.optimalSteps != null && scorecard.actualSteps != null && scorecard.actualSteps > 0) {
     const expectedEff = Math.min(1, scorecard.optimalSteps / scorecard.actualSteps);
-    if (Math.abs(scorecard.efficiency - expectedEff) > 0.02) {
+    if (Math.abs(scorecard.efficiency - expectedEff) > SCORECARD_FORMULA.efficiencyTolerance) {
       issues.push(`Efficiency ${scorecard.efficiency} != min(1, ${scorecard.optimalSteps}/${scorecard.actualSteps}) = ${expectedEff.toFixed(2)}`);
     }
   }
 
-  // Math: SessionScore matches composite formula
+  // Math: SessionScore matches composite formula. If the session was scored
+  // under a DIFFERENT config hash, a mismatch is a provenance warning (re-score
+  // to compare), not an arithmetic failure — same behavior as the cognitive kit.
   const w = SCORECARD_FORMULA.weights;
   const expectedScore = w.success * scorecard.success
     + w.efficiency * scorecard.efficiency
@@ -222,7 +236,11 @@ function checkScorecardCompleteness(scorecard) {
     + w.intent * (scorecard.intent / 7)
     + w.confidence * (scorecard.confidence / 7);
   if (Math.abs(scorecard.sessionScore - expectedScore) > SCORECARD_FORMULA.tolerance) {
-    issues.push(`SessionScore ${scorecard.sessionScore} != formula result ${expectedScore.toFixed(2)}`);
+    if (stampedHash && stampedHash !== CONFIG.hash) {
+      softMathNote = `SessionScore ${scorecard.sessionScore} differs from the current formula (${expectedScore.toFixed(2)}), but this session was scored under config ${stampedHash} (current: ${CONFIG.hash}) — re-score to compare`;
+    } else {
+      issues.push(`SessionScore ${scorecard.sessionScore} != formula result ${expectedScore.toFixed(2)}`);
+    }
   }
 
   // Likert bounds 1-7
@@ -232,8 +250,39 @@ function checkScorecardCompleteness(scorecard) {
     }
   }
 
-  if (issues.length === 0) return { status: 'pass', message: 'All 5 metrics present and consistent' };
-  return { status: 'fail', message: issues.join('; ') };
+  if (issues.length > 0) return { status: 'fail', message: issues.join('; ') };
+  if (softMathNote) return { status: 'warn', message: softMathNote };
+  return { status: 'pass', message: 'All 5 metrics present and consistent' };
+}
+
+// New check: the machine-readable sidecar agrees with the transcript prose.
+// Three-way agreement (transcript ↔ JSON ↔ formula) is what lets downstream
+// tools trust scorecard.json without re-parsing markdown.
+function checkScorecardSidecar(scorecard, scorecardJson) {
+  if (scorecardJson == null) {
+    return { status: 'warn', message: 'No scorecard.json sidecar — older session; report/diff will fall back to transcript parsing' };
+  }
+  if (scorecardJson.__parseError) {
+    return { status: 'fail', message: `scorecard.json is not valid JSON: ${scorecardJson.__parseError}` };
+  }
+  const m = scorecardJson.metrics || {};
+  const mismatches = [];
+  const near = (a, b) => a != null && b != null && Math.abs(a - b) <= 0.011;
+  if (scorecard) {
+    for (const [key, tVal] of [['success', scorecard.success], ['efficiency', scorecard.efficiency],
+      ['seq', scorecard.seq], ['intent', scorecard.intent], ['confidence', scorecard.confidence]]) {
+      if (m[key] != null && tVal != null && !near(m[key], tVal)) {
+        mismatches.push(`${key}: transcript ${tVal} vs JSON ${m[key]}`);
+      }
+    }
+    if (scorecardJson.sessionScore != null && scorecard.sessionScore != null &&
+        Math.abs(scorecardJson.sessionScore - scorecard.sessionScore) > 0.011) {
+      mismatches.push(`SessionScore: transcript ${scorecard.sessionScore} vs JSON ${scorecardJson.sessionScore}`);
+    }
+  }
+  if (mismatches.length) return { status: 'fail', message: `Transcript and scorecard.json disagree — ${mismatches.join('; ')}` };
+  const stamp = scorecardJson.meta?.scoringHash ? ` · scored under ${scorecardJson.meta.scoringHash}` : '';
+  return { status: 'pass', message: `scorecard.json present and consistent with transcript${stamp}` };
 }
 
 function checkPersonaVocabulary(transcript, vocab) {
@@ -261,26 +310,61 @@ function checkPersonaVocabulary(transcript, vocab) {
 
 function checkHallucinationClaims(transcript) {
   const patterns = [
-    { name: 'price', re: /\$\d+(?:[,.]?\d+)*(?:\s*\/\s*(?:mo|month|year|yr|user|seat))?/g },
-    { name: 'percentage', re: /\b\d+(?:\.\d+)?\s*%/g },
-    { name: 'trial', re: /\b\d+[-\s]?day(?:\s+(?:free\s+)?trial)?\b/gi },
-    { name: 'certification', re: /\b(?:SOC\s*2|ISO\s*27001|HIPAA|GDPR|PCI[-\s]?DSS|FedRAMP)\b/gi },
+    /\$\d+(?:[,.]?\d+)*(?:\s*\/\s*(?:mo|month|year|yr|user|seat))?/g,
+    /\b\d+(?:\.\d+)?\s*%/g,
+    /\b\d+[-\s]?day(?:\s+(?:free\s+)?trial)?\b/gi,
+    /\b(?:SOC\s*2|ISO\s*27001|HIPAA|GDPR|PCI[-\s]?DSS|FedRAMP)\b/gi,
   ];
 
-  // Only consider transcript narration body (skip the scorecard table, which contains numbers like 0.5 / 7)
+  // Only consider narration body (skip the scorecard table, which contains
+  // numbers like 0.5 / 7 that would read as false "claims").
   const body = transcript.split(/## Quantitative Scorecard/)[0];
+  const lines = body.split('\n');
 
-  const claims = new Set();
-  for (const { re } of patterns) {
-    for (const m of body.matchAll(re)) {
-      claims.add(m[0].trim());
+  // A claim is "cited" if a screenshot reference — [something.png] or
+  // (something.png) — appears on the same line. This makes factual claims
+  // verifiable ("check frame 3") instead of take-it-or-leave-it.
+  const CITE = /[\[(][^\])]*\.png[\])]/i;
+
+  // Normalize a claim to a canonical key so a fact cited once in the narration
+  // ("$9/month [02-pricing.png]") also covers its looser restatement in a
+  // persona quote ("$9 a month"). Without this, every paraphrase would demand
+  // its own citation — which no real transcript does.
+  const keyOf = (claim) => {
+    const c = claim.toLowerCase();
+    const price = c.match(/\$\d+(?:[,.]\d+)*/); if (price) return price[0].replace(/[,.]/g, '');
+    const day = c.match(/\d+/); if (/day/.test(c) && day) return `${day[0]}day`;
+    const pct = c.match(/\d+(?:\.\d+)?/); if (/%/.test(c) && pct) return `${pct[0]}%`;
+    return c.replace(/\s+/g, '');
+  };
+
+  const cited = new Map();   // key -> display claim
+  const uncited = new Map();
+  for (const line of lines) {
+    const hasCite = CITE.test(line);
+    for (const re of patterns) {
+      for (const m of line.matchAll(re)) {
+        const claim = m[0].trim();
+        (hasCite ? cited : uncited).set(keyOf(claim), claim);
+      }
     }
   }
+  // A fact cited on any line covers all its restatements.
+  for (const k of cited.keys()) uncited.delete(k);
 
-  if (claims.size === 0) return { status: 'pass', message: 'No specific factual claims to verify' };
+  if (cited.size === 0 && uncited.size === 0) {
+    return { status: 'pass', message: 'No specific factual claims to verify' };
+  }
+  if (uncited.size > 0) {
+    const list = [...uncited.values()];
+    return {
+      status: 'fail',
+      message: `Uncited factual claim(s) — add a [screenshot.png] citation next to each: ${list.slice(0, 8).join(', ')}${list.size > 8 ? ` (+${list.length - 8} more)` : ''}`,
+    };
+  }
   return {
-    status: 'warn',
-    message: `Spot-check these specific claims against screenshots: ${[...claims].slice(0, 8).join(', ')}${claims.size > 8 ? ` (+${claims.size - 8} more)` : ''}`,
+    status: 'pass',
+    message: `All ${cited.size} factual claim(s) cite a screenshot; spot-check the cited frames: ${[...cited.values()].slice(0, 6).join(', ')}`,
   };
 }
 
@@ -325,12 +409,14 @@ function checkSession(session) {
   const taskNumber = inferTaskNumber(session.task);
   const taskPath = taskNumber != null ? findTaskFile(taskNumber) : null;
   const bounds = parseTaskBounds(taskPath);
+  const stampedHash = session.scorecardJson?.meta?.scoringHash || null;
 
   return {
     persona: session.persona,
     task: session.task,
     checks: {
-      'Scorecard completeness': checkScorecardCompleteness(scorecard),
+      'Scorecard completeness': checkScorecardCompleteness(scorecard, stampedHash),
+      'Scorecard sidecar': checkScorecardSidecar(scorecard, session.scorecardJson),
       'Persona vocabulary': checkPersonaVocabulary(session.transcript, vocab),
       'Hallucination claims': checkHallucinationClaims(session.transcript),
       'Step bound': checkStepBound(scorecard, bounds),
@@ -347,7 +433,7 @@ const ICON = { pass: '✅', warn: '⚠️', fail: '❌' };
 
 function writeReport(results) {
   const today = new Date().toISOString().slice(0, 10);
-  const checkNames = ['Scorecard completeness', 'Persona vocabulary', 'Hallucination claims', 'Step bound', 'Construct coherence'];
+  const checkNames = ['Scorecard completeness', 'Scorecard sidecar', 'Persona vocabulary', 'Hallucination claims', 'Step bound', 'Construct coherence'];
 
   const tally = Object.fromEntries(checkNames.map(n => [n, { pass: 0, warn: 0, fail: 0 }]));
   for (const r of results) {
