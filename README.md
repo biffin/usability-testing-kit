@@ -11,6 +11,12 @@ you: "run Sarah through task 01"              →  Claude drives the browser as 
 you: node lib/report.js your-site            →  one self-contained report.html: heatmap, journey strips, issues
 ```
 
+## Example output
+
+![Persona × task SessionScore heatmap from a real study of plausible.io](docs/example-report-heatmap.png)
+
+A real study run against [plausible.io](https://plausible.io) — two buyer personas × two tasks. At a glance: the site works well for the privacy-driven solo founder (*Maya*) and less well for the compliance-driven team buyer (*David*), whose pricing session surfaced that SSO is gated behind the Enterprise "contact us" tier. The `±0.06 · n=2` cell is a replication run — the same persona × task run twice, showing the score's spread. The full `report.html` continues below the heatmap with aggregate metrics, a cross-persona issue rollup, and per-session journey strips.
+
 ---
 
 ## What you get per session
